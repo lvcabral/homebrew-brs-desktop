@@ -1,0 +1,57 @@
+name: Update Cask
+
+on:
+  schedule:
+    - cron: "0 6 * * *"  # daily at 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for new release
+        id: release
+        run: |
+          LATEST=$(curl -s https://api.github.com/repos/lvcabral/brs-desktop/releases/latest \
+            | jq -r '.tag_name | ltrimstr("v")')
+          CURRENT=$(grep 'version "' Casks/brs-desktop.rb | grep -o '"[^"]*"' | tr -d '"')
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          if [ "$LATEST" = "$CURRENT" ]; then
+            echo "up_to_date=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "up_to_date=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute SHA256 and update cask
+        if: steps.release.outputs.up_to_date == 'false'
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.release.outputs.latest }}"
+          BASE="https://github.com/lvcabral/brs-desktop/releases/download/v${VERSION}"
+          # -f fails on a missing asset (e.g. still uploading) instead of hashing the 404 page,
+          # so the cask is left untouched and the next run tries again.
+          curl -fsSL -o arm64.dmg "${BASE}/brs-desktop-${VERSION}-macOS-arm64.dmg"
+          curl -fsSL -o x64.dmg "${BASE}/brs-desktop-${VERSION}-macOS-x64.dmg"
+          ARM_SHA=$(shasum -a 256 arm64.dmg | awk '{print $1}')
+          INTEL_SHA=$(shasum -a 256 x64.dmg | awk '{print $1}')
+          rm arm64.dmg x64.dmg
+          sed -i "s/version \".*\"/version \"${VERSION}\"/" Casks/brs-desktop.rb
+          sed -i "s/sha256 arm: *\"[0-9a-f]*\"/sha256 arm:   \"${ARM_SHA}\"/" Casks/brs-desktop.rb
+          sed -i "s/intel: *\"[0-9a-f]\{64\}\"/intel: \"${INTEL_SHA}\"/" Casks/brs-desktop.rb
+          grep -q "sha256 arm:   \"${ARM_SHA}\"" Casks/brs-desktop.rb
+          grep -q "intel: \"${INTEL_SHA}\"" Casks/brs-desktop.rb
+
+      - name: Commit and push
+        if: steps.release.outputs.up_to_date == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/brs-desktop.rb
+          git commit -m "Update brs-desktop to ${{ steps.release.outputs.latest }}"
+          git push
